@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Шахматы-шашки</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/chess.js/0.10.3/chess.min.js"></script>
+<style>
+:root{--bg:#f4f1ea;--fg:#222;--lt:#f0d9b5;--dk:#b58863;color-scheme:light dark}
+@media(prefers-color-scheme:dark){:root{--bg:#1e1e1e;--fg:#eee}}
+body{margin:0;padding:env(safe-area-inset-top) 8px env(safe-area-inset-bottom);background:var(--bg);color:var(--fg);font:16px system-ui,sans-serif;display:flex;flex-direction:column;align-items:center;gap:10px}
+#st{margin-top:12px;font-weight:600;min-height:1.4em;text-align:center}
+#board{--b:min(96vw,62vh,480px);width:var(--b);height:var(--b);display:grid;grid-template-columns:repeat(8,1fr);border-radius:6px;overflow:hidden}
+.sq{position:relative;display:grid;place-items:center;font-size:calc(var(--b)/8*.4)}
+.lt{background:var(--lt)}.dk{background:var(--dk)}
+.last{box-shadow:inset 0 0 0 100px rgba(232,212,77,.45)}
+.sel{box-shadow:inset 0 0 0 3px #3b82f6}
+.cap{box-shadow:inset 0 0 0 4px rgba(220,38,38,.7)}
+.dot::after{content:"";position:absolute;width:26%;height:26%;border-radius:50%;background:rgba(0,0,0,.3)}
+.p{width:82%;height:82%;border-radius:50%;display:grid;place-items:center;font-weight:700;z-index:1}
+.p.w{background:#f7f7f7;color:#333;border:2px solid #555;box-shadow:inset 0 0 0 4px #f7f7f7,inset 0 0 0 6px #999}
+.p.b{background:#2b2b2b;color:#eee;border:2px solid #ccc;box-shadow:inset 0 0 0 4px #2b2b2b,inset 0 0 0 6px #777}
+.row{display:flex;gap:8px;flex-wrap:wrap;justify-content:center}
+select,button{font:inherit;padding:8px 12px;border-radius:8px;border:1px solid #888;background:var(--bg);color:var(--fg)}
+button.main{background:#3b82f6;border-color:#3b82f6;color:#fff}
+#promo{display:none}
+</style>
+</head>
+<body>
+<div id="st"></div>
+<div id="board"></div>
+<div id="promo" class="row">
+  <button data-p="q">Ферзь</button><button data-p="r">Ладья</button>
+  <button data-p="b">Слон</button><button data-p="n">Конь</button>
+</div>
+<div class="row">
+  <select id="side"><option value="w">Белыми</option><option value="b">Чёрными</option></select>
+  <select id="lvl"><option value="1">Лёгкий</option><option value="2" selected>Средний</option><option value="3">Сильный</option></select>
+  <button class="main" id="new">Новая игра</button>
+</div>
+<script>
+const tg = window.Telegram && Telegram.WebApp;
+if (tg) { tg.ready(); tg.expand(); }
+
+const g = new Chess();
+const V = {p:100, n:320, b:330, r:500, q:900, k:0};
+const boardEl = document.getElementById('board'), st = document.getElementById('st'), promo = document.getElementById('promo');
+let me = 'w', sel = null, level = 2, busy = false, lastMv = null, pend = null;
+
+function draw() {
+  boardEl.innerHTML = '';
+  const b = g.board();
+  const targets = sel ? g.moves({square: sel, verbose: true}) : [];
+  for (let i = 0; i < 8; i++) for (let j = 0; j < 8; j++) {
+    const r = me === 'w' ? i : 7 - i, c = me === 'w' ? j : 7 - j;
+    const name = 'abcdefgh'[c] + (8 - r);
+    const d = document.createElement('div');
+    d.className = 'sq ' + ((r + c) % 2 ? 'dk' : 'lt');
+    if (lastMv && (lastMv.from === name || lastMv.to === name)) d.classList.add('last');
+    if (sel === name) d.classList.add('sel');
+    if (targets.some(m => m.to === name)) d.classList.add(g.get(name) ? 'cap' : 'dot');
+    const p = b[r][c];
+    if (p) {
+      const e = document.createElement('div');
+      e.className = 'p ' + p.color;
+      e.textContent = p.type.toUpperCase();
+      d.appendChild(e);
+    }
+    d.onclick = () => tap(name);
+    boardEl.appendChild(d);
+  }
+  st.textContent = status();
+}
+
+function status() {
+  if (busy) return 'Бот думает…';
+  if (g.in_checkmate()) return g.turn() === me ? 'Мат. Вы проиграли.' : 'Мат! Вы победили!';
+  if (g.in_draw()) return 'Ничья.';
+  return (g.turn() === me ? 'Ваш ход' : 'Ход бота') + (g.in_check() ? ' — шах!' : '');
+}
+
+function tap(n) {
+  if (busy || g.game_over() || g.turn() !== me) return;
+  if (sel) {
+    const mv = g.moves({square: sel, verbose: true}).filter(m => m.to === n);
+    if (mv.length) {
+      if (mv[0].promotion) { pend = {from: sel, to: n}; promo.style.display = 'flex'; return; }
+      play({from: sel, to: n});
+      return;
+    }
+  }
+  const p = g.get(n);
+  sel = p && p.color === me ? n : null;
+  draw();
+}
+
+promo.onclick = e => {
+  const p = e.target.dataset.p;
+  if (!p || !pend) return;
+  promo.style.display = 'none';
+  play({...pend, promotion: p});
+  pend = null;
+};
+
+function play(m) {
+  lastMv = g.move(m);
+  sel = null;
+  draw();
+  if (!g.game_over()) botMove();
+}
+
+function botMove() {
+  busy = true;
+  st.textContent = 'Бот думает…';
+  setTimeout(() => {
+    lastMv = g.move(pick());
+    busy = false;
+    draw();
+  }, 80);
+}
+
+// ---------- простой ИИ: минимакс с альфа-бета отсечением ----------
+function ev() {
+  let s = 0;
+  const b = g.board();
+  for (let r = 0; r < 8; r++) for (let c = 0; c < 8; c++) {
+    const p = b[r][c];
+    if (!p) continue;
+    let v = V[p.type];
+    if (p.type !== 'k' && p.type !== 'r') v += 10 - 3 * (Math.abs(c - 3.5) + Math.abs(r - 3.5));
+    s += p.color === 'w' ? v : -v;
+  }
+  return g.turn() === 'w' ? s : -s;
+}
+
+function order(ms) {
+  for (let i = ms.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [ms[i], ms[j]] = [ms[j], ms[i]];
+  }
+  return ms.sort((a, b) => b.includes('x') - a.includes('x'));
+}
+
+function nm(d, a, b) {
+  if (g.in_checkmate()) return -1e5 - d;
+  if (g.in_draw()) return 0;
+  if (d === 0) return ev();
+  let best = -1e9;
+  for (const m of order(g.moves())) {
+    g.move(m);
+    const s = -nm(d - 1, -b, -a);
+    g.undo();
+    if (s > best) best = s;
+    if (best > a) a = best;
+    if (a >= b) break;
+  }
+  return best;
+}
+
+function pick() {
+  const ms = order(g.moves());
+  if (level === 1 && Math.random() < 0.3) return ms[0];
+  let best = ms[0], bs = -1e9, a = -1e9;
+  for (const m of ms) {
+    g.move(m);
+    const s = -nm(level - 1, -1e9, -a);
+    g.undo();
+    if (s > bs) { bs = s; best = m; }
+    if (s > a) a = s;
+  }
+  return best;
+}
+
+function newGame() {
+  g.reset();
+  me = document.getElementById('side').value;
+  level = +document.getElementById('lvl').value;
+  sel = null; lastMv = null; busy = false; pend = null;
+  promo.style.display = 'none';
+  draw();
+  if (me === 'b') botMove();
+}
+
+document.getElementById('new').onclick = newGame;
+newGame();
+</script>
+</body>
+</html>
